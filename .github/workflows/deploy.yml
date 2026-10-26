@@ -5,13 +5,13 @@
 # REPOSITORY PUBBLICO: i log li vede chiunque. Ogni comando che produce output lo scrive in un file del runner
 # e qui si stampano solo righe decise da noi. Il dettaglio resta sul server (releases.log, bin/releases dal PC).
 name: Deploy
-run-name: Deploy ${{ inputs.tag }}
+run-name: Deploy ${{ startsWith(inputs.tag, 'v') && inputs.tag || format('v{0}', inputs.tag) }}
 
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Versione da pubblicare (es. v0.7.0)
+        description: Versione da pubblicare (es. v0.8.0 oppure 0.8.0)
         required: true
         type: string
       sha:
@@ -31,7 +31,8 @@ jobs:
     environment: production
     timeout-minutes: 20
     env:
-      TAG: ${{ inputs.tag }}
+      # "0.8.0" e "v0.8.0" valgono uguale: il tag è sempre con la v
+      TAG: ${{ startsWith(inputs.tag, 'v') && inputs.tag || format('v{0}', inputs.tag) }}
       SHA: ${{ inputs.sha }}
     steps:
       - name: Controlla la richiesta
@@ -43,7 +44,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: egadiboats-spec/egadi-site
-          ref: refs/tags/${{ inputs.tag }}
+          ref: refs/tags/${{ startsWith(inputs.tag, 'v') && inputs.tag || format('v{0}', inputs.tag) }}
           token: ${{ secrets.SOURCE_TOKEN }}
           path: site
           fetch-depth: 0
