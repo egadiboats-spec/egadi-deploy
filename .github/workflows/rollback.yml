@@ -1,0 +1,51 @@
+# Torna a una release già presente sul server (solo codice, il database non si tocca).
+# A mano: Actions → Rollback → Run workflow, con il nome della release (elenco con bin/releases dal PC).
+# REPOSITORY PUBBLICO: si stampano solo i messaggi di egadi-release, mai l'output completo.
+name: Rollback
+run-name: Rollback a ${{ inputs.release }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: Release a cui tornare (es. v0.7.0)
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: production
+  cancel-in-progress: false
+
+jobs:
+  rollback:
+    runs-on: ubuntu-24.04
+    environment: production
+    timeout-minutes: 10
+    env:
+      REL: ${{ inputs.release }}
+    steps:
+      - name: Controlla la richiesta
+        run: '[[ "$REL" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "::error::nome non valido"; exit 1; }'
+
+      - name: Torna alla release
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          umask 077
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$RUNNER_TEMP/key"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$RUNNER_TEMP/known_hosts"
+          ok=0
+          ssh -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=20 \
+              -o UserKnownHostsFile="$RUNNER_TEMP/known_hosts" -i "$RUNNER_TEMP/key" "release@$DEPLOY_HOST" "rollback $REL" \
+              > "$RUNNER_TEMP/rollback.log" 2>&1 < /dev/null || ok=$?
+          grep -E '^(attiva: |cache riscaldata: |il sito non risponde|ERRORE: )' "$RUNNER_TEMP/rollback.log" \
+            | sed -E 's/(Disponibili:).*/\1 vedi bin\/releases dal PC/' || true
+          [ "$ok" = 0 ] || { echo "::error::rollback non riuscito"; exit 1; }
+
+      - name: Pulizia
+        if: always()
+        run: rm -f "$RUNNER_TEMP/key" "$RUNNER_TEMP/known_hosts" "$RUNNER_TEMP/rollback.log"

@@ -1,0 +1,106 @@
+# Deploy di una versione (tag vX.Y.Z del repository privato) sul server di produzione.
+# Parte dal repository privato quando si crea un tag, oppure a mano da qui (Actions → Deploy → Run workflow).
+# Il job usa l'environment "production": aspetta l'approvazione e solo dopo riceve i secret.
+#
+# REPOSITORY PUBBLICO: i log li vede chiunque. Ogni comando che produce output lo scrive in un file del runner
+# e qui si stampano solo righe decise da noi. Il dettaglio resta sul server (releases.log, bin/releases dal PC).
+name: Deploy
+run-name: Deploy ${{ inputs.tag }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Versione da pubblicare (es. v0.7.0)
+        required: true
+        type: string
+      sha:
+        description: Commit atteso del tag (40 caratteri; lo compila la richiesta automatica)
+        required: false
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    environment: production
+    timeout-minutes: 20
+    env:
+      TAG: ${{ inputs.tag }}
+      SHA: ${{ inputs.sha }}
+    steps:
+      - name: Controlla la richiesta
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::versione non valida"; exit 1; }
+          [ -z "$SHA" ] || [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::commit non valido"; exit 1; }
+
+      - name: Scarica il codice della versione
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: egadiboats-spec/egadi-site
+          ref: refs/tags/${{ inputs.tag }}
+          token: ${{ secrets.SOURCE_TOKEN }}
+          path: site
+          fetch-depth: 0
+          persist-credentials: false
+          show-progress: false
+
+      - name: Controlla che la versione sia su main
+        working-directory: site
+        run: |
+          commit="$(git rev-parse 'HEAD^{commit}')"
+          [ -z "$SHA" ] || [ "$commit" = "$SHA" ] || { echo "::error::il tag non punta al commit approvato"; exit 1; }
+          git merge-base --is-ancestor "$commit" origin/main || { echo "::error::il tag non è su main"; exit 1; }
+          echo "versione $TAG, commit ${commit:0:7}"
+
+      - name: Prepara il collegamento al server
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          umask 077
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$RUNNER_TEMP/key"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$RUNNER_TEMP/known_hosts"
+
+      - name: Controlla lo script di release sul server
+        working-directory: site
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          ssh_r() { ssh -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=20 \
+                -o UserKnownHostsFile="$RUNNER_TEMP/known_hosts" -i "$RUNNER_TEMP/key" "release@$DEPLOY_HOST" "$@"; }
+          ssh_r sha > "$RUNNER_TEMP/sha.txt" 2>&1 || { echo "::error::server non raggiungibile"; exit 1; }
+          want_rel="$(sha256sum tools/deploy/egadi-release.sh | cut -d' ' -f1)"
+          want_gate="$(sha256sum tools/deploy/egadi-release-gate.sh | cut -d' ' -f1)"
+          grep -q "^$want_rel .*/egadi-release$" "$RUNNER_TEMP/sha.txt" && grep -q "^$want_gate .*/egadi-release-gate$" "$RUNNER_TEMP/sha.txt" \
+            || { echo "::error::lo script di release sul server non è quello di questa versione: fai prima bin/deploy dal PC"; exit 1; }
+          echo "script di release allineato"
+
+      - name: Crea il pacchetto
+        working-directory: site
+        run: |
+          name="$(bin/deploy --package "$RUNNER_TEMP/release.tgz" 2> "$RUNNER_TEMP/build.log" | tail -1)" \
+            || { echo "::error::creazione del pacchetto non riuscita"; exit 1; }
+          [ "$name" = "$TAG" ] || { echo "::error::nome della release inatteso"; exit 1; }
+          echo "pacchetto pronto ($(du -k "$RUNNER_TEMP/release.tgz" | cut -f1) KB)"
+
+      - name: Attiva la versione
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          ok=0
+          ssh -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=20 -o ServerAliveInterval=30 \
+              -o UserKnownHostsFile="$RUNNER_TEMP/known_hosts" -i "$RUNNER_TEMP/key" "release@$DEPLOY_HOST" "activate $TAG" \
+              < "$RUNNER_TEMP/release.tgz" > "$RUNNER_TEMP/activate.log" 2>&1 || ok=$?
+          # Solo i messaggi di egadi-release (nessun percorso, nessun elenco di file)
+          grep -E '^(attiva: |cache riscaldata: |il sito non risponde|ERRORE: )' "$RUNNER_TEMP/activate.log" | sed -E 's/^ERRORE: errori di sintassi PHP.*/ERRORE: errori di sintassi PHP (dettagli con bin\/releases dal PC)/' || true
+          [ "$ok" = 0 ] || { echo "::error::attivazione non riuscita: il sito è rimasto sulla versione precedente"; exit 1; }
+
+      - name: Pulizia
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/key" "$RUNNER_TEMP/known_hosts" "$RUNNER_TEMP"/*.log "$RUNNER_TEMP"/*.txt "$RUNNER_TEMP/release.tgz" site
