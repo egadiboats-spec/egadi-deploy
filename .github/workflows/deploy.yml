@@ -84,9 +84,13 @@ jobs:
       - name: Crea il pacchetto
         working-directory: site
         run: |
-          name="$(bin/deploy --package "$RUNNER_TEMP/release.tgz" 2> "$RUNNER_TEMP/build.log" | tail -1)" \
-            || { echo "::error::creazione del pacchetto non riuscita"; exit 1; }
-          [ "$name" = "$TAG" ] || { echo "::error::nome della release inatteso"; exit 1; }
+          rc=0
+          bin/deploy --package "$RUNNER_TEMP/release.tgz" > "$RUNNER_TEMP/build.out" 2> "$RUNNER_TEMP/build.log" || rc=$?
+          # Si stampano solo il codice di uscita e il nome calcolato (un tag o <data>-<commit>), mai il log
+          [ "$rc" = 0 ] || { echo "::error::creazione del pacchetto non riuscita (codice $rc)"; exit 1; }
+          name="$(tail -1 "$RUNNER_TEMP/build.out")"
+          [[ "$name" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || name="(non valido)"
+          [ "$name" = "$TAG" ] || { echo "::error::nome della release inatteso: $name"; exit 1; }
           echo "pacchetto pronto ($(du -k "$RUNNER_TEMP/release.tgz" | cut -f1) KB)"
 
       - name: Attiva la versione
@@ -103,4 +107,4 @@ jobs:
 
       - name: Pulizia
         if: always()
-        run: rm -rf "$RUNNER_TEMP/key" "$RUNNER_TEMP/known_hosts" "$RUNNER_TEMP"/*.log "$RUNNER_TEMP"/*.txt "$RUNNER_TEMP/release.tgz" site
+        run: rm -rf "$RUNNER_TEMP/key" "$RUNNER_TEMP/known_hosts" "$RUNNER_TEMP"/*.log "$RUNNER_TEMP"/*.txt "$RUNNER_TEMP"/*.out "$RUNNER_TEMP/release.tgz" site
